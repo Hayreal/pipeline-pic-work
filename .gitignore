@@ -1,0 +1,23 @@
+.env
+node_modules/
+*.log
+dist/
+dist-electron/
+release/
+
+# Python pipeline venv
+look-image-utils-feat-look-pipeline/.venv/
+**/.venv/
+__pycache__/
+*.pyc
+
+# Runtime data (local app data)
+*.workspace-ready
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
