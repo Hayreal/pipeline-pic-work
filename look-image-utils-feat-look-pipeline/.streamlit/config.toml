@@ -1,0 +1,13 @@
+# 本地开发默认：http://localhost:8501/
+# 以仓库根为 cwd 执行 `streamlit run look_pipeline/streamlit_app.py` 时生效
+
+[server]
+port = 8501
+headless = true
+address = "127.0.0.1"
+
+[browser]
+gatherUsageStats = false
+
+[theme]
+base = "light"
