@@ -10,7 +10,7 @@ look-image-utils-feat-look-pipeline/.venv/
 **/.venv/
 __pycache__/
 *.pyc
-
+pipeline-workspace/
 # Runtime data (local app data)
 *.workspace-ready
 

@@ -3,7 +3,7 @@ import { useNavigate } from "react-router-dom";
 import styled from "styled-components";
 import { theme } from "../styles/theme";
 import { Button, Toggle } from "../components/shared";
-import { ArrowLeft, Check, Loader2 } from "lucide-react";
+import { AlertTriangle, ArrowLeft, Check, Loader2 } from "lucide-react";
 import { useWorkflow } from "../context/WorkflowContext";
 
 const PageContent = styled.div`
@@ -152,13 +152,35 @@ const ResolutionSelect = styled.select`
   }
 `;
 
+const NoticeCard = styled.div<{ $tone?: "info" | "warning" }>`
+  border-radius: ${theme.sizes.borderRadiusSm};
+  padding: 12px 14px;
+  background: ${({ $tone = "info" }) =>
+    $tone === "warning" ? "rgba(255, 184, 77, 0.08)" : theme.colors.bg};
+  border: 1px solid
+    ${({ $tone = "info" }) =>
+      $tone === "warning" ? "rgba(255, 184, 77, 0.24)" : theme.colors.border};
+  color: ${theme.colors.textSecondary};
+  font-size: 12px;
+  line-height: 1.6;
+`;
+
+const NoticeTitle = styled.div`
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 6px;
+  color: ${theme.colors.text};
+  font-weight: 600;
+`;
+
 const StatusLog = styled.pre`
   font-size: 11px;
   color: ${theme.colors.textSecondary};
   background: ${theme.colors.bg};
   padding: 10px 12px;
   border-radius: ${theme.sizes.borderRadiusSm};
-  max-height: 120px;
+  max-height: 160px;
   overflow-y: auto;
   white-space: pre-wrap;
   word-break: break-word;
@@ -172,6 +194,20 @@ const ActionsBar = styled.div`
   padding: 16px 40px 24px;
   flex-shrink: 0;
 `;
+
+type ManifestRoles = Record<string, unknown>;
+
+function hasManifestFaceRole(raw: unknown): boolean {
+  const roles = (raw as { roles?: ManifestRoles } | null)?.roles;
+  if (!roles || typeof roles !== "object") return false;
+  const face = roles.face;
+  if (!face || typeof face !== "object") return false;
+
+  const candidate = face as { path?: unknown; paths?: unknown };
+  if (typeof candidate.path === "string" && candidate.path.trim()) return true;
+  if (Array.isArray(candidate.paths) && candidate.paths.length > 0) return true;
+  return false;
+}
 
 export function RefinePage() {
   const navigate = useNavigate();
@@ -192,8 +228,9 @@ export function RefinePage() {
   const [running, setRunning] = useState(false);
   const [log, setLog] = useState("");
   const [imageUrls, setImageUrls] = useState<string[]>([]);
+  const [hasFaceReference, setHasFaceReference] = useState(false);
+  const [manifestChecked, setManifestChecked] = useState(false);
 
-  // Load generated images from run directory
   useEffect(() => {
     if (!lastRun?.runDir) return;
     let mounted = true;
@@ -213,12 +250,60 @@ export function RefinePage() {
         // ignore
       }
     };
-    load();
-    return () => { mounted = false; };
+    void load();
+    return () => {
+      mounted = false;
+    };
   }, [lastRun?.runDir]);
 
+  useEffect(() => {
+    if (!lastRun?.runDir) {
+      setHasFaceReference(false);
+      setManifestChecked(false);
+      return;
+    }
+
+    let mounted = true;
+    const inspectManifest = async () => {
+      try {
+        const manifestPath = await window.electronAPI.path.join(lastRun.runDir, "input_manifest.json");
+        const manifest = await window.electronAPI.file.readJson(manifestPath);
+        if (mounted) {
+          setHasFaceReference(hasManifestFaceRole(manifest));
+          setManifestChecked(true);
+        }
+      } catch {
+        if (mounted) {
+          setHasFaceReference(false);
+          setManifestChecked(true);
+        }
+      }
+    };
+
+    void inspectManifest();
+    return () => {
+      mounted = false;
+    };
+  }, [lastRun?.runDir]);
+
+  const hasSelectedAction = refineOptions.faceEdit;
+  const blockingReason = !lastRun?.runId || !lastRun?.runDir
+    ? "No previous pipeline run was found. Run draft generation first."
+    : !hasSelectedAction
+      ? "No refine action is enabled. Turn on Face Refine before starting."
+      : refineOptions.faceEdit && manifestChecked && !hasFaceReference
+        ? "Face refine requires at least one uploaded image with role `face`. Go back to Prepare Materials and add it first."
+        : "";
+  const canRun = !running && blockingReason === "";
+
   const handleGenerate = useCallback(async () => {
-    console.log("[RefinePage] handleGenerate called", { lastRun: lastRun?.runId, refineOptions, selectedVersion });
+    if (blockingReason) {
+      setLog(blockingReason);
+      setPipelineStatus("idle");
+      setPipelineError(blockingReason);
+      return;
+    }
+
     if (!lastRun?.runId || !lastRun?.runDir) {
       setLog("No pipeline run found. Please run the pipeline first.");
       return;
@@ -228,42 +313,34 @@ export function RefinePage() {
     setPipelineStatus("running");
     setPipelineProgress(0);
     setPipelineStep("Starting refine...");
+    setPipelineOutput("");
+    setPipelineError("");
     setLog("");
 
-    const commands: Array<"refine-pass" | "face-edit" | "detail-edit"> = [];
+    const commands: Array<"face-edit"> = [];
     if (refineOptions.faceEdit) commands.push("face-edit");
-    // refine-pass requires regions_{k}.json, not yet available in the app
-
-    console.log("[RefinePage] commands to run:", commands);
 
     if (commands.length === 0) {
-      setLog("未选择精修选项。请启用脸部精修。");
+      setLog("No refine action is currently executable.");
+      setPipelineStatus("idle");
       setRunning(false);
       return;
     }
 
-    // Execute each refine command sequentially
     for (const cmd of commands) {
       setPipelineStep(`Running ${cmd}...`);
-      setLog((prev) => prev + `\n[${cmd}] Starting...\n`);
-
-      const extraArgs: string[] = [];
-      if (cmd === "refine-pass") {
-        extraArgs.push("--index", String(selectedVersion));
-      }
+      setLog((prev) => `${prev}\n[${cmd}] Starting...\n`);
 
       try {
-        console.log("[RefinePage] calling refineRun:", { runId: lastRun.runId, command: cmd, extraArgs });
         const result = await window.electronAPI.script.refineRun({
           runId: lastRun.runId,
           command: cmd,
-          extraArgs,
+          extraArgs: [],
         });
-        console.log("[RefinePage] refineRun result:", result);
 
-        setLog((prev) => prev + result.output + "\n");
+        setLog((prev) => `${prev}${result.output || ""}\n`);
         if (!result.success) {
-          setLog((prev) => prev + `[${cmd}] ERROR: ${result.error}\n`);
+          setLog((prev) => `${prev}[${cmd}] ERROR: ${result.error}\n`);
           setPipelineStatus("error");
           setPipelineOutput(result.output);
           setPipelineError(result.error || "");
@@ -272,7 +349,7 @@ export function RefinePage() {
         }
       } catch (err) {
         const message = err instanceof Error ? err.message : "Unknown error";
-        setLog((prev) => prev + `[${cmd}] ERROR: ${message}\n`);
+        setLog((prev) => `${prev}[${cmd}] ERROR: ${message}\n`);
         setPipelineStatus("error");
         setPipelineError(message);
         setRunning(false);
@@ -280,12 +357,11 @@ export function RefinePage() {
       }
     }
 
-    // Rescan for generated images after refine
     try {
       const files = await window.electronAPI.file.listDir(lastRun.runDir);
       const imageFiles = await Promise.all(
         files
-          .filter((f) => f.endsWith(".png") && f.startsWith("draft_"))
+          .filter((f) => f.endsWith(".png") && (f.startsWith("draft_") || f.startsWith("look_")))
           .map(async (f) => ({
             path: await window.electronAPI.path.join(lastRun.runDir, f),
             label: f,
@@ -301,21 +377,33 @@ export function RefinePage() {
     setPipelineStatus("success");
     setPipelineProgress(100);
     setPipelineStep("Refine complete");
+    setPipelineError("");
     setRunning(false);
     navigate("/deliver");
-  }, [lastRun, refineOptions, selectedVersion, navigate, setPipelineStatus, setPipelineProgress, setPipelineStep, setGeneratedImages, setPipelineOutput, setPipelineError]);
+  }, [
+    blockingReason,
+    lastRun,
+    navigate,
+    refineOptions.faceEdit,
+    setGeneratedImages,
+    setPipelineError,
+    setPipelineOutput,
+    setPipelineProgress,
+    setPipelineStatus,
+    setPipelineStep,
+  ]);
 
   return (
     <PageContent>
       <ScrollContent>
-        <PageTitle>精细终稿</PageTitle>
+        <PageTitle>Refine Final Output</PageTitle>
         <PageDescription>
-          从初版中选定满意构图，配置精细化参数后生成最终版本。
+          Select a draft version, then run the refine step that is currently supported by the desktop app.
         </PageDescription>
 
         <TwoPanel>
           <SelectPanel>
-            <PanelTitle>选择终稿构图</PanelTitle>
+            <PanelTitle>Select Draft Version</PanelTitle>
             <VersionCards>
               {[0, 1, 2].map((i) => (
                 <VersionCard
@@ -332,8 +420,7 @@ export function RefinePage() {
                     <Thumbnail src={imageUrls[i]} alt={`Version ${i + 1}`} />
                   ) : (
                     <VersionLabel $selected={selectedVersion === i}>
-                      {selectedVersion === i ? "✓ v" : "v"}
-                      {i + 1}
+                      v{i + 1}
                     </VersionLabel>
                   )}
                 </VersionCard>
@@ -342,12 +429,19 @@ export function RefinePage() {
           </SelectPanel>
 
           <OptionsPanel>
-            <PanelTitle>精细化选项</PanelTitle>
+            <PanelTitle>Refine Options</PanelTitle>
+
+            <NoticeCard>
+              <NoticeTitle>Available in desktop app</NoticeTitle>
+              <div>`face-edit` is available now.</div>
+              <div>`refine-pass` is not wired yet because it needs a manual `regions_k.json` file.</div>
+              <div>`detail-edit` is not wired yet because it needs explicit detail reference images and edit notes.</div>
+            </NoticeCard>
 
             <OptionRow>
               <OptionLabel>
-                <OptionTitle>脸部精修</OptionTitle>
-                <OptionDesc>基于 face 参考图精修面部</OptionDesc>
+                <OptionTitle>Face Refine</OptionTitle>
+                <OptionDesc>Requires at least one uploaded image with role `face`.</OptionDesc>
               </OptionLabel>
               <Toggle
                 $checked={refineOptions.faceEdit}
@@ -357,19 +451,30 @@ export function RefinePage() {
 
             <OptionRow>
               <OptionLabel>
-                <OptionTitle>输出分辨率</OptionTitle>
+                <OptionTitle>Output Resolution</OptionTitle>
+                <OptionDesc>This option is stored in UI state only for now.</OptionDesc>
               </OptionLabel>
               <ResolutionSelect
                 value={refineOptions.resolution}
                 onChange={(e) => setRefineOptions({ resolution: e.target.value })}
               >
-                <option value="4k">4K (3840×5120)</option>
-                <option value="2k">2K (2560×3840)</option>
-                <option value="hd">HD (1920×2560)</option>
+                <option value="4k">4K (3840x5120)</option>
+                <option value="2k">2K (2560x3840)</option>
+                <option value="hd">HD (1920x2560)</option>
               </ResolutionSelect>
             </OptionRow>
 
-            {running && (
+            {blockingReason && (
+              <NoticeCard $tone="warning">
+                <NoticeTitle>
+                  <AlertTriangle size={14} />
+                  Cannot start yet
+                </NoticeTitle>
+                <div>{blockingReason}</div>
+              </NoticeCard>
+            )}
+
+            {(running || log) && (
               <StatusLog>
                 {pipelineStep}
                 {"\n"}
@@ -383,16 +488,16 @@ export function RefinePage() {
       <ActionsBar>
         <Button $variant="secondary" onClick={() => navigate("/generate")}>
           <ArrowLeft size={14} />
-          返回
+          Back
         </Button>
         <Button
           $variant="primary"
           $size="lg"
-          disabled={running}
+          disabled={!canRun}
           onClick={handleGenerate}
         >
           {running ? <Loader2 size={14} style={{ animation: "spin 1s linear infinite" }} /> : null}
-          {running ? "生成中..." : "生成精细终稿 →"}
+          {running ? "Running..." : "Generate Refined Output"}
         </Button>
       </ActionsBar>
     </PageContent>

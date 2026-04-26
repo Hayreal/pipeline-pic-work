@@ -1,7 +1,7 @@
 {
   "name": "ai-image-workbench",
   "version": "1.0.0",
-  "description": "AI 出图工作台 — 桌面应用",
+  "description": "AI 出图工作台桌面应用",
   "main": "dist-electron/main/index.js",
   "author": "Designer",
   "license": "MIT",
@@ -11,8 +11,8 @@
     "preview": "vite preview",
     "electron:dev": "concurrently -k \"vite\" \"wait-on http://localhost:5173 && electron .\"",
     "electron:build": "npm run build && electron-builder",
-    "electron:build:win": "npm run build && electron-builder --win",
-    "electron:build:mac": "npm run build && electron-builder --mac",
+    "electron:build:win": "npm run build && powershell -NoProfile -ExecutionPolicy Bypass -File scripts/electron-build-win.ps1",
+    "electron:build:mac": "npm run build && set ELECTRON_BUILDER_BINARIES_MIRROR=https://npmmirror.com/mirrors/electron-builder-binaries/&& set ELECTRON_MIRROR=https://npmmirror.com/mirrors/electron/&& electron-builder --mac",
     "setup-pipeline": "node pipeline/setup-workspace.js"
   },
   "dependencies": {
@@ -50,14 +50,20 @@
       {
         "from": "pipeline/",
         "to": "pipeline/",
-        "filter": ["**/*", "!setup-workspace.js"]
+        "filter": [
+          "**/*",
+          "!setup-workspace.js"
+        ]
       }
     ],
     "mac": {
       "target": [
         {
           "target": "dmg",
-          "arch": ["x64", "arm64"]
+          "arch": [
+            "x64",
+            "arm64"
+          ]
         }
       ],
       "category": "public.app-category.graphics-design",
@@ -67,7 +73,9 @@
       "target": [
         {
           "target": "nsis",
-          "arch": ["x64"]
+          "arch": [
+            "x64"
+          ]
         }
       ],
       "icon": "build/icon.ico"

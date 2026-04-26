@@ -1,4 +1,4 @@
-import { BrowserRouter, Routes, Route, Navigate } from "react-router-dom";
+import { HashRouter, Routes, Route, Navigate } from "react-router-dom";
 import { ThemeProvider } from "styled-components";
 import { theme } from "./styles/theme";
 import { GlobalStyle } from "./styles/GlobalStyle";
@@ -16,7 +16,7 @@ export default function App() {
     <ThemeProvider theme={theme}>
       <GlobalStyle />
       <WorkflowProvider>
-        <BrowserRouter>
+        <HashRouter>
           <Layout>
             <Routes>
               <Route path="/" element={<Navigate to="/prepare" replace />} />
@@ -28,7 +28,7 @@ export default function App() {
               <Route path="/settings" element={<SettingsPage />} />
             </Routes>
           </Layout>
-        </BrowserRouter>
+        </HashRouter>
       </WorkflowProvider>
     </ThemeProvider>
   );
