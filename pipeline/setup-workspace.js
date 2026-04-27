@@ -1,23 +1,55 @@
 #!/usr/bin/env node
 /**
- * Setup pipeline workspace: downloads uv, copies Python project, creates venv.
+ * Cross-platform pipeline workspace setup.
  *
  * Usage:
  *   node pipeline/setup-workspace.js
  */
 
 const fs = require("fs");
+const fsp = require("fs/promises");
 const path = require("path");
 const https = require("https");
 const { spawn } = require("child_process");
 
-const pipelineDir = path.resolve(__dirname);
-const uvExe = path.join(pipelineDir, "uv.exe");
-const workspaceDir = path.resolve(pipelineDir, "..", "pipeline-workspace");
+const UV_VERSION = "0.8.9";
+const pipelineAssetsDir = path.resolve(__dirname);
+const projectRoot = path.resolve(pipelineAssetsDir, "..");
+const pipelineSourceDir = path.join(projectRoot, "look-image-utils-feat-look-pipeline");
+const workspaceDir = path.join(projectRoot, "pipeline-workspace");
 const workspaceProjectDir = path.join(workspaceDir, "look-image-utils-feat-look-pipeline");
+const toolsDir = path.join(workspaceDir, "tools");
 
-const UV_DOWNLOAD_URL =
-  "https://github.com/astral-sh/uv/releases/download/0.8.9/uv-x86_64-pc-windows-msvc.zip";
+function getUvExecutableName() {
+  return process.platform === "win32" ? "uv.exe" : "uv";
+}
+
+function getWorkspacePythonPath() {
+  return process.platform === "win32"
+    ? path.join(workspaceProjectDir, ".venv", "Scripts", "python.exe")
+    : path.join(workspaceProjectDir, ".venv", "bin", "python");
+}
+
+function getUvDownloadUrl() {
+  if (process.platform === "win32") {
+    if (process.arch !== "x64") {
+      throw new Error(`Unsupported Windows architecture: ${process.arch}`);
+    }
+    return `https://github.com/astral-sh/uv/releases/download/${UV_VERSION}/uv-x86_64-pc-windows-msvc.zip`;
+  }
+
+  if (process.platform === "darwin") {
+    if (process.arch === "arm64") {
+      return `https://github.com/astral-sh/uv/releases/download/${UV_VERSION}/uv-aarch64-apple-darwin.tar.gz`;
+    }
+    if (process.arch === "x64") {
+      return `https://github.com/astral-sh/uv/releases/download/${UV_VERSION}/uv-x86_64-apple-darwin.tar.gz`;
+    }
+    throw new Error(`Unsupported macOS architecture: ${process.arch}`);
+  }
+
+  throw new Error(`Unsupported platform: ${process.platform}`);
+}
 
 async function downloadFile(url, dest) {
   return new Promise((resolve, reject) => {
@@ -44,19 +76,15 @@ async function downloadFile(url, dest) {
   });
 }
 
-async function extractZip(zipPath, destDir) {
-  // Use built-in PowerShell Expand-Archive (no npm dependency needed)
-  const { execSync } = require("child_process");
-  fs.mkdirSync(destDir, { recursive: true });
-  execSync(
-    `powershell -Command "Expand-Archive -LiteralPath '${zipPath}' -DestinationPath '${destDir}' -Force"`,
-  );
-}
-
-async function run(cmd, args, opts) {
+async function run(cmd, args, opts = {}) {
   console.log(`  > ${cmd} ${args.join(" ")}`);
   return new Promise((resolve, reject) => {
-    const proc = spawn(cmd, args, { shell: true, stdio: "inherit", ...opts });
+    const proc = spawn(cmd, args, {
+      shell: false,
+      stdio: "inherit",
+      windowsHide: process.platform === "win32",
+      ...opts,
+    });
     proc.on("close", (code) => {
       if (code === 0) resolve();
       else reject(new Error(`${cmd} exited with code ${code}`));
@@ -65,85 +93,151 @@ async function run(cmd, args, opts) {
   });
 }
 
-async function main() {
-  console.log("=== Pipeline Workspace Setup ===\n");
-
-  // 1. Create workspace directory
-  fs.mkdirSync(workspaceDir, { recursive: true });
-  console.log(`Workspace: ${workspaceDir}`);
-
-  // 2. Copy Python project to workspace
-  console.log("\nCopying Python project...");
-  const srcProject = pipelineDir;
-  const destProject = workspaceProjectDir;
-  if (fs.existsSync(destProject)) {
-    fs.rmSync(destProject, { recursive: true, force: true });
-  }
-  copyDirSync(srcProject, destProject, [".venv", "__pycache__", ".mypy_cache", "node_modules"]);
-  console.log("  Project copied.");
-
-  // 3. Download uv if not present in pipeline dir
-  if (!fs.existsSync(uvExe)) {
-    console.log("\nDownloading uv...");
-    const zipPath = path.join(pipelineDir, "uv-temp.zip");
-    await downloadFile(UV_DOWNLOAD_URL, zipPath);
-    const extractDir = path.join(pipelineDir, "uv-temp");
-    await extractZip(zipPath, extractDir);
-    fs.rmSync(zipPath);
-    // Find uv.exe in the extracted directory
-    const files = findFiles(extractDir, "uv.exe");
-    if (files.length === 0) throw new Error("uv.exe not found in downloaded zip");
-    fs.copyFileSync(files[0], uvExe);
-    fs.rmSync(extractDir, { recursive: true, force: true });
-    console.log("  uv downloaded.");
-  } else {
-    console.log("\nuv already exists.");
-  }
-
-  // 4. Create venv in workspace
-  console.log("\nCreating virtual environment...");
-  await run(uvExe, ["venv", "--python", "3.12"], { cwd: workspaceDir });
-  console.log("  venv created.");
-
-  // 5. Sync dependencies
-  console.log("\nInstalling dependencies (uv sync)...");
-  await run(uvExe, ["sync"], { cwd: workspaceProjectDir });
-  console.log("  dependencies installed.");
-
-  // 6. Write workspace marker for the Electron app to detect
-  fs.writeFileSync(
-    path.join(workspaceDir, ".workspace-ready"),
-    JSON.stringify({ setupAt: new Date().toISOString(), uvPath: uvExe }) + "\n",
-  );
-
-  console.log("\n=== Setup complete! ===");
-  console.log(`Workspace: ${workspaceDir}`);
-  console.log(`uv: ${uvExe}`);
+async function extractArchive(archivePath, destDir) {
+  fs.mkdirSync(destDir, { recursive: true });
+  await run("tar", ["-xf", archivePath, "-C", destDir]);
 }
 
-function copyDirSync(src, dest, ignore = []) {
+async function ensureExecutable(filePath) {
+  if (process.platform !== "win32") {
+    await fsp.chmod(filePath, 0o755);
+  }
+}
+
+async function findUvOnPath() {
+  const locator = process.platform === "win32" ? "where" : "which";
+  const candidates = process.platform === "win32" ? ["uv", "uv.exe", "uv.cmd"] : ["uv"];
+
+  return new Promise((resolve) => {
+    const proc = spawn(locator, candidates, {
+      shell: true,
+      windowsHide: process.platform === "win32",
+    });
+    let out = "";
+    proc.stdout.on("data", (chunk) => {
+      out += chunk.toString("utf8");
+    });
+    proc.on("close", () => {
+      const lines = out.trim().split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
+      resolve(lines[0] || null);
+    });
+    proc.on("error", () => resolve(null));
+  });
+}
+
+function copyDirSync(src, dest, ignore = new Set()) {
   fs.mkdirSync(dest, { recursive: true });
   for (const entry of fs.readdirSync(src, { withFileTypes: true })) {
-    if (ignore.includes(entry.name)) continue;
+    if (ignore.has(entry.name)) continue;
     const srcPath = path.join(src, entry.name);
     const destPath = path.join(dest, entry.name);
-    if (entry.isDirectory()) {
-      copyDirSync(srcPath, destPath, ignore);
-    } else {
-      fs.copyFileSync(srcPath, destPath);
-    }
+    if (entry.isDirectory()) copyDirSync(srcPath, destPath, ignore);
+    else fs.copyFileSync(srcPath, destPath);
   }
 }
 
-function findFiles(dir, name) {
-  let results = [];
-  if (!fs.existsSync(dir)) return results;
+function findFileSync(dir, name) {
+  if (!fs.existsSync(dir)) return null;
   for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
     const fullPath = path.join(dir, entry.name);
-    if (entry.isDirectory()) results = results.concat(findFiles(fullPath, name));
-    else if (entry.name === name) results.push(fullPath);
+    if (entry.isDirectory()) {
+      const found = findFileSync(fullPath, name);
+      if (found) return found;
+    } else if (entry.name === name) {
+      return fullPath;
+    }
   }
-  return results;
+  return null;
+}
+
+async function resolveUvBinary() {
+  const pathUv = await findUvOnPath();
+  if (pathUv && fs.existsSync(pathUv)) {
+    console.log(`  Found uv on PATH: ${pathUv}`);
+    return pathUv;
+  }
+
+  const bundledUv = path.join(pipelineAssetsDir, getUvExecutableName());
+  if (fs.existsSync(bundledUv)) {
+    await ensureExecutable(bundledUv);
+    console.log(`  Using bundled uv: ${bundledUv}`);
+    return bundledUv;
+  }
+
+  const localUv = path.join(toolsDir, getUvExecutableName());
+  if (fs.existsSync(localUv)) {
+    await ensureExecutable(localUv);
+    console.log(`  Using cached uv: ${localUv}`);
+    return localUv;
+  }
+
+  console.log("  Downloading uv...");
+  await fsp.mkdir(toolsDir, { recursive: true });
+  const downloadUrl = getUvDownloadUrl();
+  const archiveName = path.basename(new URL(downloadUrl).pathname);
+  const archivePath = path.join(toolsDir, archiveName);
+  const extractDir = path.join(toolsDir, "uv-temp-extract");
+  await downloadFile(downloadUrl, archivePath);
+  await extractArchive(archivePath, extractDir);
+  await fsp.rm(archivePath, { force: true });
+  const found = findFileSync(extractDir, getUvExecutableName());
+  if (!found) {
+    throw new Error(`${getUvExecutableName()} not found in downloaded archive`);
+  }
+  await fsp.copyFile(found, localUv);
+  await ensureExecutable(localUv);
+  await fsp.rm(extractDir, { recursive: true, force: true });
+  console.log(`  uv downloaded: ${localUv}`);
+  return localUv;
+}
+
+async function main() {
+  console.log("=== Pipeline Workspace Setup ===\n");
+  console.log(`Platform: ${process.platform} ${process.arch}`);
+
+  await fsp.mkdir(workspaceDir, { recursive: true });
+  console.log(`Workspace: ${workspaceDir}`);
+
+  if (!fs.existsSync(pipelineSourceDir)) {
+    throw new Error(`Pipeline source directory not found: ${pipelineSourceDir}`);
+  }
+
+  console.log("\nCopying Python project...");
+  if (fs.existsSync(workspaceProjectDir)) {
+    fs.rmSync(workspaceProjectDir, { recursive: true, force: true });
+  }
+  copyDirSync(
+    pipelineSourceDir,
+    workspaceProjectDir,
+    new Set([".venv", "__pycache__", ".mypy_cache", "node_modules", ".git"]),
+  );
+  console.log("  Project copied.");
+
+  const uvBinary = await resolveUvBinary();
+
+  console.log("\nCreating virtual environment...");
+  await run(uvBinary, ["venv", "--python", "3.12"], { cwd: workspaceProjectDir });
+  console.log("  venv created.");
+
+  console.log("\nInstalling dependencies (uv sync)...");
+  await run(uvBinary, ["sync"], { cwd: workspaceProjectDir });
+  console.log("  dependencies installed.");
+
+  const pythonPath = getWorkspacePythonPath();
+  fs.writeFileSync(
+    path.join(workspaceDir, ".workspace-ready"),
+    JSON.stringify({
+      setupAt: new Date().toISOString(),
+      uvPath: uvBinary,
+      pythonPath,
+      platform: process.platform,
+      arch: process.arch,
+    }) + "\n",
+  );
+
+  console.log("\n=== Setup complete ===");
+  console.log(`uv: ${uvBinary}`);
+  console.log(`python: ${pythonPath}`);
 }
 
 main().catch((err) => {

@@ -16,21 +16,26 @@ const diskCachePath = path.join(runtimeRoot, "cache");
 
 // ── Bundled pipeline paths ──────────────────────────────────
 
-/** Where the Python source code lives (the look_pipeline package). */
+/** Where the Python source project lives (the look_pipeline package plus pyproject.toml). */
 const pipelineSourceDir = isDev
   ? path.resolve(__dirname, "../../look-image-utils-feat-look-pipeline")
-  : path.join(process.resourcesPath, "pipeline");
+  : path.join(process.resourcesPath, "look-image-utils-feat-look-pipeline");
 
 const workspaceDir = path.join(runtimeRoot, "pipeline-workspace");
 const workspaceProjectDir = path.join(workspaceDir, "look-image-utils-feat-look-pipeline");
 
-/** Where uv.exe lives in dev (downloaded once or from system). */
-const pipelineToolsDir = isDev
+/** Bundled helper assets packaged with the Electron app. */
+const bundledPipelineAssetsDir = isDev
   ? path.resolve(__dirname, "../../pipeline")
   : path.join(process.resourcesPath, "pipeline");
 
+/** Writable tool cache used by the desktop app at runtime. */
+const pipelineToolsDir = path.join(runtimeRoot, "tools");
+
 function getWorkspacePythonPath(): string {
-  return path.join(workspaceProjectDir, ".venv", "Scripts", "python.exe");
+  return process.platform === "win32"
+    ? path.join(workspaceProjectDir, ".venv", "Scripts", "python.exe")
+    : path.join(workspaceProjectDir, ".venv", "bin", "python");
 }
 
 let mainWindow: BrowserWindow | null = null;
@@ -143,24 +148,26 @@ function downloadFile(url: string, dest: string): Promise<void> {
   });
 }
 
-/** Extract a zip using PowerShell Expand-Archive. */
-async function extractZipWithPowerShell(zipPath: string, destDir: string): Promise<void> {
-  await fs.mkdir(destDir, { recursive: true });
+function runCommand(command: string, args: string[], options: { cwd?: string } = {}): Promise<void> {
   return new Promise((resolve, reject) => {
-    const p = spawn(
-      "powershell",
-      [
-        "-Command",
-        `Expand-Archive -LiteralPath '${zipPath.replace(/'/g, "''")}' -DestinationPath '${destDir.replace(/'/g, "''")}' -Force`,
-      ],
-      { shell: true, windowsHide: true },
-    );
-    p.on("close", (code) => {
-      if (code === 0) resolve();
-      else reject(new Error(`PowerShell unzip failed with code ${code}`));
+    const child = spawn(command, args, {
+      cwd: options.cwd,
+      windowsHide: process.platform === "win32",
+      shell: false,
     });
-    p.on("error", reject);
+
+    child.on("close", (code) => {
+      if (code === 0) resolve();
+      else reject(new Error(`${command} ${args.join(" ")} failed with code ${code}`));
+    });
+    child.on("error", reject);
   });
+}
+
+/** Extract an archive using the system tar/bsdtar command. */
+async function extractArchive(zipPath: string, destDir: string): Promise<void> {
+  await fs.mkdir(destDir, { recursive: true });
+  await runCommand("tar", ["-xf", zipPath, "-C", destDir]);
 }
 
 /** Find a file by name recursively (sync). */
@@ -178,13 +185,53 @@ function findFileSync(dir: string, name: string): string | null {
   return null;
 }
 
-const UV_DOWNLOAD_URL =
-  "https://github.com/astral-sh/uv/releases/download/0.8.9/uv-x86_64-pc-windows-msvc.zip";
+const UV_VERSION = "0.8.9";
 
-/** Try to find uv.exe on PATH (uses `where` on Windows). */
+function getUvExecutableName(): string {
+  return process.platform === "win32" ? "uv.exe" : "uv";
+}
+
+function getBundledUvPath(): string {
+  return path.join(bundledPipelineAssetsDir, getUvExecutableName());
+}
+
+function getDownloadedUvPath(): string {
+  return path.join(pipelineToolsDir, getUvExecutableName());
+}
+
+function getUvDownloadUrl(): string {
+  if (process.platform === "win32") {
+    if (process.arch !== "x64") {
+      throw new Error(`Unsupported Windows architecture: ${process.arch}`);
+    }
+    return `https://github.com/astral-sh/uv/releases/download/${UV_VERSION}/uv-x86_64-pc-windows-msvc.zip`;
+  }
+
+  if (process.platform === "darwin") {
+    if (process.arch === "arm64") {
+      return `https://github.com/astral-sh/uv/releases/download/${UV_VERSION}/uv-aarch64-apple-darwin.tar.gz`;
+    }
+    if (process.arch === "x64") {
+      return `https://github.com/astral-sh/uv/releases/download/${UV_VERSION}/uv-x86_64-apple-darwin.tar.gz`;
+    }
+    throw new Error(`Unsupported macOS architecture: ${process.arch}`);
+  }
+
+  throw new Error(`Unsupported platform: ${process.platform}`);
+}
+
+async function ensureExecutable(filePath: string): Promise<void> {
+  if (process.platform !== "win32") {
+    await fs.chmod(filePath, 0o755);
+  }
+}
+
+/** Try to find uv on PATH. */
 async function findUvOnPath(): Promise<string | null> {
   return new Promise((resolve) => {
-    const p = spawn("where", ["uv", "uv.exe", "uv.cmd"], { shell: true, windowsHide: true });
+    const locator = process.platform === "win32" ? "where" : "which";
+    const candidates = process.platform === "win32" ? ["uv", "uv.exe", "uv.cmd"] : ["uv"];
+    const p = spawn(locator, candidates, { shell: true, windowsHide: process.platform === "win32" });
     let out = "";
     p.stdout.on("data", (d: Buffer) => { out += d.toString("utf-8"); });
     p.on("close", () => {
@@ -222,10 +269,11 @@ async function initWorkspace(): Promise<{ success: boolean; error?: string }> {
       if (mainWindow) mainWindow.webContents.send("pipeline:init", { step: `Found uv on PATH: ${pathUv}` });
     }
 
-    // 2b. Try bundled uv.exe in pipeline tools dir
+    // 2b. Try bundled uv in packaged resources or the dev tools directory
     if (!uvExe) {
-      const bundledUv = path.join(pipelineToolsDir, "uv.exe");
+      const bundledUv = getBundledUvPath();
       if (fsSync.existsSync(bundledUv)) {
+        await ensureExecutable(bundledUv);
         uvExe = bundledUv;
         if (mainWindow) mainWindow.webContents.send("pipeline:init", { step: "Using bundled uv." });
       }
@@ -234,22 +282,25 @@ async function initWorkspace(): Promise<{ success: boolean; error?: string }> {
     // 2c. Download from GitHub as last resort
     if (!uvExe) {
       if (mainWindow) mainWindow.webContents.send("pipeline:init", { step: "Downloading uv from GitHub..." });
-      const localUv = path.join(pipelineToolsDir, "uv.exe");
+      const localUv = getDownloadedUvPath();
       try {
         await fs.mkdir(pipelineToolsDir, { recursive: true });
-        const zipPath = path.join(pipelineToolsDir, "uv-temp.zip");
-        await downloadFile(UV_DOWNLOAD_URL, zipPath);
+        const downloadUrl = getUvDownloadUrl();
+        const archiveName = path.basename(new URL(downloadUrl).pathname);
+        const zipPath = path.join(pipelineToolsDir, archiveName);
         const extractDir = path.join(pipelineToolsDir, "uv-temp-extract");
-        await extractZipWithPowerShell(zipPath, extractDir);
-        await fs.rm(zipPath);
-        const found = findFileSync(extractDir, "uv.exe");
-        if (!found) throw new Error("uv.exe not found in downloaded zip");
+        await downloadFile(downloadUrl, zipPath);
+        await extractArchive(zipPath, extractDir);
+        await fs.rm(zipPath, { force: true });
+        const found = findFileSync(extractDir, getUvExecutableName());
+        if (!found) throw new Error(`${getUvExecutableName()} not found in downloaded archive`);
         await fs.copyFile(found, localUv);
+        await ensureExecutable(localUv);
         await fs.rm(extractDir, { recursive: true, force: true });
         uvExe = localUv;
       } catch (downloadErr) {
         throw new Error(
-          `Could not download uv. Please install uv manually (https://github.com/astral-sh/uv) and set it on PATH, or place uv.exe in: ${pipelineToolsDir}`,
+          `Could not download uv. Please install uv manually (https://github.com/astral-sh/uv) and set it on PATH, or place ${getUvExecutableName()} in: ${pipelineToolsDir}`,
         );
       }
     }
@@ -259,7 +310,10 @@ async function initWorkspace(): Promise<{ success: boolean; error?: string }> {
     // 3. Create venv inside the project directory (where pyproject.toml lives)
     if (mainWindow) mainWindow.webContents.send("pipeline:init", { step: "Creating virtual environment..." });
     await new Promise<void>((resolve, reject) => {
-      const p = spawn(uvExe!, ["venv", "--python", "3.12"], { cwd: workspaceProjectDir, windowsHide: true });
+      const p = spawn(uvExe!, ["venv", "--python", "3.12"], {
+        cwd: workspaceProjectDir,
+        windowsHide: process.platform === "win32",
+      });
       p.on("close", (code) => { if (code === 0) resolve(); else reject(new Error(`uv venv failed: ${code}`)); });
       p.on("error", reject);
     });
@@ -267,7 +321,10 @@ async function initWorkspace(): Promise<{ success: boolean; error?: string }> {
     // 4. Install dependencies
     if (mainWindow) mainWindow.webContents.send("pipeline:init", { step: "Installing dependencies (uv sync)..." });
     await new Promise<void>((resolve, reject) => {
-      const p = spawn(uvExe!, ["sync"], { cwd: workspaceProjectDir, windowsHide: true });
+      const p = spawn(uvExe!, ["sync"], {
+        cwd: workspaceProjectDir,
+        windowsHide: process.platform === "win32",
+      });
       p.on("close", (code) => { if (code === 0) resolve(); else reject(new Error(`uv sync failed: ${code}`)); });
       p.on("error", reject);
     });
@@ -275,7 +332,7 @@ async function initWorkspace(): Promise<{ success: boolean; error?: string }> {
     // 5. Write marker file
     await fs.writeFile(
       path.join(workspaceDir, ".workspace-ready"),
-      JSON.stringify({ setupAt: new Date().toISOString(), uvPath: uvExe }) + "\n",
+      JSON.stringify({ setupAt: new Date().toISOString(), uvPath: uvExe, platform: process.platform, arch: process.arch }) + "\n",
     );
 
     if (mainWindow) mainWindow.webContents.send("pipeline:init", { step: "Pipeline ready." });
@@ -306,7 +363,7 @@ function spawnPipeline(
   return spawn(pythonPath, args, {
     cwd: workspaceProjectDir,
     env,
-    windowsHide: true,
+    windowsHide: process.platform === "win32",
   });
 }
 

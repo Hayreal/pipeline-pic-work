@@ -48,6 +48,13 @@
     ],
     "extraResources": [
       {
+        "from": "look-image-utils-feat-look-pipeline/",
+        "to": "look-image-utils-feat-look-pipeline/",
+        "filter": [
+          "**/*"
+        ]
+      },
+      {
         "from": "pipeline/",
         "to": "pipeline/",
         "filter": [
