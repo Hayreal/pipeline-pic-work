@@ -12,7 +12,7 @@
     "electron:dev": "concurrently -k \"vite\" \"wait-on http://localhost:5173 && electron .\"",
     "electron:build": "npm run build && electron-builder",
     "electron:build:win": "npm run build && powershell -NoProfile -ExecutionPolicy Bypass -File scripts/electron-build-win.ps1",
-    "electron:build:mac": "npm run build && set ELECTRON_BUILDER_BINARIES_MIRROR=https://npmmirror.com/mirrors/electron-builder-binaries/&& set ELECTRON_MIRROR=https://npmmirror.com/mirrors/electron/&& electron-builder --mac",
+    "electron:build:mac": "npm run build && node scripts/electron-build-mac.js",
     "setup-pipeline": "node pipeline/setup-workspace.js"
   },
   "dependencies": {
